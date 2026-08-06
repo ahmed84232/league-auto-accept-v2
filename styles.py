@@ -271,6 +271,24 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     color: {{MUTED}};
     font-size: 11px;
 }
+
+#versionLabel {
+    color: {{MUTED}};
+    font-size: 12px;
+}
+
+#linkButton {
+    background-color: transparent;
+    border: none;
+    color: {{INFO}};
+    font-size: 12px;
+    padding: 2px 4px;
+}
+
+#linkButton:hover {
+    color: {{ACCENT_LIGHT}};
+    text-decoration: underline;
+}
 """
 
 STYLESHEET = _QSS_TEMPLATE

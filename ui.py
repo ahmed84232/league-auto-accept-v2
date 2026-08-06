@@ -1,15 +1,21 @@
 import html
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-    QMainWindow, QPushButton, QScrollArea, QSizeGrip, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizeGrip,
+    QVBoxLayout, QWidget,
 )
 
 from styles import LOG_COLORS, PALETTE
+from updater import UpdateChecker
+from version import __version__
 from worker import AutoAcceptWorker
+
+OWNER = "ahmed84232"
+REPO = "league-auto-accept-v2"
 
 PHASE_META = {
     "None": ("idle", "Idle"),
@@ -94,10 +100,13 @@ class MainWindow(QMainWindow):
         self.resize(480, 720)
 
         self.worker = None
+        self._checker = None
         self.matches_accepted = 0
         self._is_running = False
 
         self._setup_ui()
+
+        QTimer.singleShot(3000, lambda: self._check_for_updates())
 
     def _setup_ui(self):
         central = QWidget()
@@ -236,6 +245,22 @@ class MainWindow(QMainWindow):
         hint.setAlignment(Qt.AlignCenter)
         layout.addWidget(hint)
 
+        footer = QHBoxLayout()
+        footer.setContentsMargins(4, 0, 4, 0)
+        version_label = QLabel(f"v{__version__}")
+        version_label.setObjectName("versionLabel")
+        footer.addWidget(version_label)
+
+        footer.addStretch()
+
+        self.update_btn = QPushButton("Check for updates")
+        self.update_btn.setObjectName("linkButton")
+        self.update_btn.setCursor(Qt.PointingHandCursor)
+        self.update_btn.clicked.connect(lambda: self._check_for_updates(manual=True))
+        footer.addWidget(self.update_btn)
+
+        layout.addLayout(footer)
+
         grip_row = QHBoxLayout()
         grip_row.setContentsMargins(0, 0, 0, 0)
         grip_row.addStretch()
@@ -293,6 +318,50 @@ class MainWindow(QMainWindow):
         self.matches_accepted += 1
         self.matches_value.setText(str(self.matches_accepted))
 
+    def _check_for_updates(self, manual=False):
+        if self._checker is not None and self._checker.isRunning():
+            return
+        if manual:
+            self._add_log_entry("Checking for updates...", "info")
+        self._checker = UpdateChecker(OWNER, REPO, __version__, parent=self)
+        self._checker.result_signal.connect(
+            lambda ok, has_update, tag, body, url:
+                self._on_update_result(ok, has_update, tag, body, url, manual)
+        )
+        self._checker.start()
+
+    def _on_update_result(self, ok, has_update, tag, body, url, manual):
+        if not ok:
+            self._add_log_entry("Update check failed (network or GitHub issue).", "warning")
+            if manual:
+                QMessageBox.warning(
+                    self, "Update check failed",
+                    "Could not reach GitHub. Check your internet connection.",
+                )
+            return
+
+        if has_update:
+            self._add_log_entry(f"Update available: {tag}", "success")
+            self._show_update_dialog(tag, body, url)
+        elif manual:
+            self._add_log_entry("You're up to date.", "success")
+            QMessageBox.information(
+                self, "Up to date",
+                f"You're running the latest version (v{__version__}).",
+            )
+
+    def _show_update_dialog(self, tag, body, url):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Update available")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(f"A new version is available: {tag}")
+        msg.setInformativeText(body.strip() or "No release notes.")
+        open_btn = msg.addButton("Open GitHub", QMessageBox.ActionRole)
+        msg.addButton("Later", QMessageBox.RejectRole)
+        msg.exec()
+        if msg.clickedButton() is open_btn:
+            QDesktopServices.openUrl(QUrl(url))
+
     def _toggle_service(self):
         if self._is_running:
             self._stop_service()
@@ -337,4 +406,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._stop_service()
+        if self._checker:
+            self._checker.wait(6000)
         event.accept()
