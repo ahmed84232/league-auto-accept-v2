@@ -1,4 +1,5 @@
 import html
+import json
 import os
 import subprocess
 from datetime import datetime
@@ -21,6 +22,12 @@ from worker import AutoAcceptWorker
 
 OWNER = "ahmed84232"
 REPO = "league-auto-accept-v2"
+
+SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session.json")
+
+
+def default_session():
+    return {"wins": 0, "losses": 0, "lp_delta": 0, "tier": None, "division": None, "lp": None}
 
 PHASE_META = {
     "None": ("idle", "Idle"),
@@ -113,7 +120,10 @@ class MainWindow(QMainWindow):
         self.matches_accepted = 0
         self._is_running = False
 
+        self.session = self._load_session()
+
         self._setup_ui()
+        self._refresh_session_ui()
 
         QTimer.singleShot(3000, lambda: self._check_for_updates())
 
@@ -135,6 +145,7 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(14)
 
         content_layout.addWidget(self._create_status_card())
+        content_layout.addWidget(self._create_session_card())
         content_layout.addWidget(self._create_log_card(), 1)
         content_layout.addWidget(self._create_control_panel())
 
@@ -196,6 +207,80 @@ class MainWindow(QMainWindow):
         self.phase_badge.setProperty("phase", "stopped")
         self.phase_badge.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.phase_badge, alignment=Qt.AlignCenter)
+
+        return card
+
+    def _create_session_card(self):
+        card = self._make_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header_label = QLabel("SESSION STATS")
+        header_label.setObjectName("logHeader")
+        header.addWidget(header_label)
+        header.addStretch()
+
+        self.new_session_btn = QPushButton("New Session")
+        self.new_session_btn.setObjectName("clearButton")
+        self.new_session_btn.setCursor(Qt.PointingHandCursor)
+        self.new_session_btn.clicked.connect(self._reset_session)
+        header.addWidget(self.new_session_btn)
+        layout.addLayout(header)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        self.wins_value = QLabel("0")
+        self.wins_value.setObjectName("sessionWinValue")
+        self.wins_value.setAlignment(Qt.AlignCenter)
+        wins_label = QLabel("WINS")
+        wins_label.setObjectName("statCaption")
+        wins_label.setAlignment(Qt.AlignCenter)
+
+        self.losses_value = QLabel("0")
+        self.losses_value.setObjectName("sessionLossValue")
+        self.losses_value.setAlignment(Qt.AlignCenter)
+        losses_label = QLabel("LOSSES")
+        losses_label.setObjectName("statCaption")
+        losses_label.setAlignment(Qt.AlignCenter)
+
+        self.lp_delta_value = QLabel("+0")
+        self.lp_delta_value.setObjectName("sessionLpValue")
+        self.lp_delta_value.setProperty("delta", "zero")
+        self.lp_delta_value.setAlignment(Qt.AlignCenter)
+        lp_label = QLabel("LP")
+        lp_label.setObjectName("statCaption")
+        lp_label.setAlignment(Qt.AlignCenter)
+
+        for value, caption in (
+            (self.wins_value, wins_label),
+            (self.losses_value, losses_label),
+            (self.lp_delta_value, lp_label),
+        ):
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            col.addWidget(value)
+            col.addWidget(caption)
+            row.addLayout(col, 1)
+
+        layout.addLayout(row)
+
+        divider = QFrame()
+        divider.setObjectName("divider")
+        divider.setFixedHeight(1)
+        layout.addWidget(divider)
+
+        rank_row = QHBoxLayout()
+        self.rank_label = QLabel("Unranked")
+        self.rank_label.setObjectName("rankLabel")
+        rank_row.addWidget(self.rank_label)
+        rank_row.addStretch()
+        self.rank_lp_label = QLabel("")
+        self.rank_lp_label.setObjectName("rankLpLabel")
+        rank_row.addWidget(self.rank_lp_label)
+        layout.addLayout(rank_row)
 
         return card
 
@@ -335,6 +420,83 @@ class MainWindow(QMainWindow):
         self.matches_accepted += 1
         self.matches_value.setText(str(self.matches_accepted))
 
+    def _load_session(self):
+        try:
+            with open(SESSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            session = default_session()
+            session.update({k: data[k] for k in session if k in data})
+            return session
+        except (OSError, ValueError, TypeError):
+            return default_session()
+
+    def _save_session(self):
+        try:
+            with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.session, f, indent=2)
+        except OSError:
+            pass
+
+    def _refresh_session_ui(self):
+        s = self.session
+        self.wins_value.setText(str(s["wins"]))
+        self.losses_value.setText(str(s["losses"]))
+
+        delta = s["lp_delta"]
+        self.lp_delta_value.setText(f"{delta:+d}")
+        prop = "positive" if delta > 0 else "negative" if delta < 0 else "zero"
+        self._refresh_property(self.lp_delta_value, "delta", prop)
+
+        tier, division, lp = s.get("tier"), s.get("division"), s.get("lp")
+        if tier and division:
+            self.rank_label.setText(f"{tier} {division}")
+            self.rank_lp_label.setText(f"{lp} LP" if lp is not None else "")
+        else:
+            self.rank_label.setText("Unranked")
+            self.rank_lp_label.setText("")
+
+    def _reset_session(self):
+        confirm = QMessageBox.question(
+            self,
+            "New Session",
+            "Start a new session? Current wins/losses and LP change will be cleared.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self.session = default_session()
+        self._save_session()
+        self._refresh_session_ui()
+        self._add_log_entry("New session started.", "info")
+
+    def _on_game_result(self, result):
+        if result.get("remake"):
+            self._add_log_entry("Remake detected — result not counted.", "warning")
+        else:
+            outcome = result.get("result")
+            if outcome == "win":
+                self.session["wins"] += 1
+                self._add_log_entry("Victory! Session updated.", "success")
+            elif outcome == "loss":
+                self.session["losses"] += 1
+                self._add_log_entry("Defeat. Session updated.", "warning")
+            else:
+                self._add_log_entry("Game over — result could not be determined.", "warning")
+
+        delta = result.get("lp_delta")
+        if not result.get("remake") and delta is not None:
+            self.session["lp_delta"] += delta
+
+        post = result.get("post")
+        if post:
+            self.session["tier"] = post.get("tier")
+            self.session["division"] = post.get("division")
+            self.session["lp"] = post.get("lp")
+
+        self._save_session()
+        self._refresh_session_ui()
+
     def _check_for_updates(self, manual=False):
         if self._checker is not None and self._checker.isRunning():
             return
@@ -468,6 +630,7 @@ class MainWindow(QMainWindow):
         self.worker.phase_signal.connect(self._update_phase)
         self.worker.connected_signal.connect(self._update_connected)
         self.worker.match_accepted_signal.connect(self._on_match_accepted)
+        self.worker.game_result_signal.connect(self._on_game_result)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.start()
 

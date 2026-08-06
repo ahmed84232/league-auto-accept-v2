@@ -172,6 +172,52 @@ QWidget {
     color: {{ERROR}};
 }
 
+#sessionWinValue {
+    font-size: 22px;
+    font-weight: 700;
+    color: {{SUCCESS}};
+}
+
+#sessionLossValue {
+    font-size: 22px;
+    font-weight: 700;
+    color: {{ERROR}};
+}
+
+#sessionLpValue {
+    font-size: 22px;
+    font-weight: 700;
+    color: {{MUTED}};
+}
+
+#sessionLpValue[delta="positive"] {
+    color: {{SUCCESS}};
+}
+
+#sessionLpValue[delta="negative"] {
+    color: {{ERROR}};
+}
+
+#statCaption {
+    font-size: 10px;
+    font-weight: 600;
+    color: {{MUTED}};
+    letter-spacing: 1.2px;
+}
+
+#rankLabel {
+    font-size: 15px;
+    font-weight: 700;
+    color: {{ACCENT_LIGHT}};
+    letter-spacing: 1.5px;
+}
+
+#rankLpLabel {
+    font-size: 13px;
+    font-weight: 600;
+    color: {{MUTED}};
+}
+
 #logHeader {
     font-size: 11px;
     font-weight: 600;
