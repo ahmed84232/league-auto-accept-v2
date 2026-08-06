@@ -1,16 +1,21 @@
 import html
+import os
+import subprocess
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizeGrip,
-    QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+    QSizeGrip, QVBoxLayout, QWidget,
 )
 
 from styles import LOG_COLORS, PALETTE
-from updater import UpdateChecker
+from updater import (
+    UPDATER_SCRIPT, UpdateChecker, UpdateDownloader,
+    extract_update, pythonw_executable,
+)
 from version import __version__
 from worker import AutoAcceptWorker
 
@@ -101,6 +106,9 @@ class MainWindow(QMainWindow):
 
         self.worker = None
         self._checker = None
+        self._downloader = None
+        self._update_staging = None
+        self._update_zip = None
         self.matches_accepted = 0
         self._is_running = False
 
@@ -240,6 +248,14 @@ class MainWindow(QMainWindow):
         self.toggle_btn.clicked.connect(self._toggle_service)
         layout.addWidget(self.toggle_btn)
 
+        self.progress = QProgressBar()
+        self.progress.setObjectName("updateProgress")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+
         hint = QLabel("Waits for match and accepts instantly")
         hint.setObjectName("hint")
         hint.setAlignment(Qt.AlignCenter)
@@ -325,12 +341,12 @@ class MainWindow(QMainWindow):
             self._add_log_entry("Checking for updates...", "info")
         self._checker = UpdateChecker(OWNER, REPO, __version__, parent=self)
         self._checker.result_signal.connect(
-            lambda ok, has_update, tag, body, url:
-                self._on_update_result(ok, has_update, tag, body, url, manual)
+            lambda ok, has_update, tag, body, url, download_url:
+                self._on_update_result(ok, has_update, tag, body, url, download_url, manual)
         )
         self._checker.start()
 
-    def _on_update_result(self, ok, has_update, tag, body, url, manual):
+    def _on_update_result(self, ok, has_update, tag, body, url, download_url, manual):
         if not ok:
             self._add_log_entry("Update check failed (network or GitHub issue).", "warning")
             if manual:
@@ -342,7 +358,7 @@ class MainWindow(QMainWindow):
 
         if has_update:
             self._add_log_entry(f"Update available: {tag}", "success")
-            self._show_update_dialog(tag, body, url)
+            self._show_update_dialog(tag, body, url, download_url)
         elif manual:
             self._add_log_entry("You're up to date.", "success")
             QMessageBox.information(
@@ -350,17 +366,84 @@ class MainWindow(QMainWindow):
                 f"You're running the latest version (v{__version__}).",
             )
 
-    def _show_update_dialog(self, tag, body, url):
+    def _show_update_dialog(self, tag, body, url, download_url):
         msg = QMessageBox(self)
         msg.setWindowTitle("Update available")
         msg.setIcon(QMessageBox.Information)
         msg.setText(f"A new version is available: {tag}")
         msg.setInformativeText(body.strip() or "No release notes.")
+
+        update_btn = None
+        if download_url:
+            update_btn = msg.addButton("Download & Update", QMessageBox.ActionRole)
         open_btn = msg.addButton("Open GitHub", QMessageBox.ActionRole)
         msg.addButton("Later", QMessageBox.RejectRole)
         msg.exec()
-        if msg.clickedButton() is open_btn:
+
+        clicked = msg.clickedButton()
+        if update_btn and clicked is update_btn:
+            self._start_update(download_url)
+        elif clicked is open_btn:
             QDesktopServices.openUrl(QUrl(url))
+
+    def _start_update(self, download_url):
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        staging = os.path.join(app_dir, ".update")
+        os.makedirs(staging, exist_ok=True)
+
+        self._update_staging = staging
+        self._update_zip = os.path.join(staging, "update.zip")
+
+        self._add_log_entry("Downloading update...", "info")
+        self.progress.setValue(0)
+        self.progress.show()
+        self.update_btn.setEnabled(False)
+
+        self._downloader = UpdateDownloader(download_url, self._update_zip, parent=self)
+        self._downloader.progress_signal.connect(self.progress.setValue)
+        self._downloader.done_signal.connect(self._on_download_done)
+        self._downloader.start()
+
+    def _on_download_done(self, ok, message):
+        if not ok:
+            self._add_log_entry(f"Update download failed: {message}", "error")
+            self.progress.hide()
+            self.update_btn.setEnabled(True)
+            return
+        self._add_log_entry("Download complete, applying update...", "info")
+        self._apply_update()
+
+    def _apply_update(self):
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        extract_dir = os.path.join(self._update_staging, "extracted")
+
+        try:
+            source_dir = extract_update(self._update_zip, extract_dir)
+        except Exception as exc:
+            self._add_log_entry(f"Failed to unpack update: {exc}", "error")
+            self.progress.hide()
+            self.update_btn.setEnabled(True)
+            return
+
+        updater_path = os.path.join(self._update_staging, "updater.pyw")
+        with open(updater_path, "w", encoding="utf-8") as f:
+            f.write(UPDATER_SCRIPT)
+
+        interpreter = pythonw_executable()
+        launcher = os.path.join(app_dir, "main.pyw")
+        if not os.path.exists(launcher):
+            launcher = os.path.join(app_dir, "main.py")
+
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            [interpreter, updater_path, app_dir, source_dir,
+             str(os.getpid()), interpreter, launcher],
+            cwd=app_dir,
+            close_fds=True,
+            creationflags=flags,
+        )
+        self._add_log_entry("Restarting to finish update...", "success")
+        self.close()
 
     def _toggle_service(self):
         if self._is_running:
@@ -408,4 +491,6 @@ class MainWindow(QMainWindow):
         self._stop_service()
         if self._checker:
             self._checker.wait(6000)
+        if self._downloader:
+            self._downloader.wait(60000)
         event.accept()

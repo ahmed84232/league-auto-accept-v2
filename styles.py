@@ -289,6 +289,19 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     color: {{ACCENT_LIGHT}};
     text-decoration: underline;
 }
+
+#updateProgress {
+    background-color: {{SURFACE_2}};
+    border: 1px solid {{BORDER}};
+    border-radius: 7px;
+    min-height: 8px;
+    max-height: 8px;
+}
+
+#updateProgress::chunk {
+    background-color: {{ACCENT}};
+    border-radius: 7px;
+}
 """
 
 STYLESHEET = _QSS_TEMPLATE
