@@ -115,6 +115,7 @@ import time
 
 def main():
     app_dir, source_dir, pid, interpreter, launcher = sys.argv[1:6]
+    version_tag = sys.argv[6] if len(sys.argv) > 6 else ""
     pid = int(pid)
     try:
         import psutil
@@ -135,6 +136,11 @@ def main():
         else:
             shutil.copy2(src, dst)
 
+    if version_tag:
+        with open(os.path.join(app_dir, "version.py"), "w", encoding="utf-8") as f:
+            f.write('__version__ = "%s"\\n' % version_tag.lstrip("v"))
+
+    shutil.rmtree(os.path.join(app_dir, "__pycache__"), ignore_errors=True)
     shutil.rmtree(os.path.join(app_dir, ".update"), ignore_errors=True)
 
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)

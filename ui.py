@@ -109,6 +109,7 @@ class MainWindow(QMainWindow):
         self._downloader = None
         self._update_staging = None
         self._update_zip = None
+        self._update_tag = ""
         self.matches_accepted = 0
         self._is_running = False
 
@@ -382,17 +383,18 @@ class MainWindow(QMainWindow):
 
         clicked = msg.clickedButton()
         if update_btn and clicked is update_btn:
-            self._start_update(download_url)
+            self._start_update(download_url, tag)
         elif clicked is open_btn:
             QDesktopServices.openUrl(QUrl(url))
 
-    def _start_update(self, download_url):
+    def _start_update(self, download_url, tag=""):
         app_dir = os.path.dirname(os.path.abspath(__file__))
         staging = os.path.join(app_dir, ".update")
         os.makedirs(staging, exist_ok=True)
 
         self._update_staging = staging
         self._update_zip = os.path.join(staging, "update.zip")
+        self._update_tag = tag
 
         self._add_log_entry("Downloading update...", "info")
         self.progress.setValue(0)
@@ -437,7 +439,7 @@ class MainWindow(QMainWindow):
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(
             [interpreter, updater_path, app_dir, source_dir,
-             str(os.getpid()), interpreter, launcher],
+             str(os.getpid()), interpreter, launcher, self._update_tag],
             cwd=app_dir,
             close_fds=True,
             creationflags=flags,
