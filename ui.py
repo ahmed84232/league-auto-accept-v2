@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
         self._update_zip = None
         self._update_tag = ""
         self.matches_accepted = 0
+        self.matches_played = 0
         self._is_running = False
 
         self.session = self._load_session()
@@ -189,7 +190,23 @@ class MainWindow(QMainWindow):
         matches_label.setAlignment(Qt.AlignRight)
         matches_box.addWidget(self.matches_value)
         matches_box.addWidget(matches_label)
-        top.addLayout(matches_box)
+
+        played_box = QVBoxLayout()
+        played_box.setSpacing(0)
+        self.played_value = QLabel("0")
+        self.played_value.setObjectName("matchesValue")
+        self.played_value.setAlignment(Qt.AlignRight)
+        played_label = QLabel("MATCHES PLAYED")
+        played_label.setObjectName("matchesLabel")
+        played_label.setAlignment(Qt.AlignRight)
+        played_box.addWidget(self.played_value)
+        played_box.addWidget(played_label)
+
+        counts_row = QHBoxLayout()
+        counts_row.setSpacing(16)
+        counts_row.addLayout(matches_box)
+        counts_row.addLayout(played_box)
+        top.addLayout(counts_row)
 
         layout.addLayout(top)
 
@@ -390,6 +407,7 @@ class MainWindow(QMainWindow):
         )
         entry.setObjectName("logEntry")
         entry.setTextFormat(Qt.RichText)
+        entry.setWordWrap(True)
         entry.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         self.log_layout.insertWidget(self.log_layout.count() - 1, entry)
@@ -419,6 +437,10 @@ class MainWindow(QMainWindow):
     def _on_match_accepted(self):
         self.matches_accepted += 1
         self.matches_value.setText(str(self.matches_accepted))
+
+    def _on_game_started(self):
+        self.matches_played += 1
+        self.played_value.setText(str(self.matches_played))
 
     def _load_session(self):
         try:
@@ -630,6 +652,7 @@ class MainWindow(QMainWindow):
         self.worker.phase_signal.connect(self._update_phase)
         self.worker.connected_signal.connect(self._update_connected)
         self.worker.match_accepted_signal.connect(self._on_match_accepted)
+        self.worker.game_started_signal.connect(self._on_game_started)
         self.worker.game_result_signal.connect(self._on_game_result)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.start()

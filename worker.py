@@ -16,11 +16,18 @@ class AutoAcceptWorker(QThread):
     phase_signal = Signal(str)
     connected_signal = Signal(bool)
     match_accepted_signal = Signal()
+    game_started_signal = Signal()
     game_result_signal = Signal(dict)
 
     CLIENT_PROCESS = "LeagueClientUx.exe"
     RANKED_QUEUE_ID = 420
     RANKED_QUEUE_NAME = "RANKED_SOLO_5x5"
+
+    TIERS = (
+        "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD",
+        "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER",
+    )
+    DIVISIONS = ("IV", "III", "II", "I")
 
     GAME_ACTIVE_PHASES = ("ChampSelect", "GameStart", "InProgress", "InGame", "Reconnect")
 
@@ -132,6 +139,25 @@ class AutoAcceptWorker(QThread):
     @staticmethod
     def _stats_changed(a, b):
         return any(a.get(k) != b.get(k) for k in ("tier", "division", "lp", "wins", "losses"))
+
+    @classmethod
+    def _rank_points(cls, stats):
+        tier = (stats or {}).get("tier")
+        division = (stats or {}).get("division")
+        lp = (stats or {}).get("lp") or 0
+        if tier not in cls.TIERS or division not in cls.DIVISIONS:
+            return None
+        return cls.TIERS.index(tier) * 400 + cls.DIVISIONS.index(division) * 100 + lp
+
+    @classmethod
+    def _lp_delta(cls, pre, post):
+        if pre is None or post is None:
+            return None
+        pre_pts = cls._rank_points(pre)
+        post_pts = cls._rank_points(post)
+        if pre_pts is None or post_pts is None:
+            return None
+        return post_pts - pre_pts
 
     def _wait_for_ranked_update(self, session, base, pre):
         post = None
@@ -273,9 +299,7 @@ class AutoAcceptWorker(QThread):
         remake = bool(eog and (eog.get("game_length") or 0) < 300)
         win = None if remake else (eog.get("win") if eog else None)
 
-        lp_delta = None
-        if pre and post and pre.get("lp") is not None and post.get("lp") is not None:
-            lp_delta = post["lp"] - pre["lp"]
+        lp_delta = self._lp_delta(pre, post)
 
         if remake:
             text = "Game over — remake, result not counted"
@@ -360,8 +384,10 @@ class AutoAcceptWorker(QThread):
                             game = self._begin_midgame_tracking(session, base)
                             if game is not None:
                                 self._ranked_game = game
+                                self.game_started_signal.emit()
                         elif self._ranked_game is not None and not self._ranked_game.get("started"):
                             self._ranked_game["started"] = True
+                            self.game_started_signal.emit()
                         self._log("Game in progress...", "info")
                         self._sleep(10)
                     else:
