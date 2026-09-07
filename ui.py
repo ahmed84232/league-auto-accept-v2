@@ -2,14 +2,14 @@ import html
 import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import date, datetime
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-    QSizeGrip, QVBoxLayout, QWidget,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
+    QPushButton, QScrollArea, QSizeGrip, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from styles import LOG_COLORS, PALETTE
@@ -24,10 +24,22 @@ OWNER = "ahmed84232"
 REPO = "league-auto-accept-v2"
 
 SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session.json")
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
+MAX_HISTORY = 200
 
 
 def default_session():
     return {"wins": 0, "losses": 0, "lp_delta": 0, "tier": None, "division": None, "lp": None}
+
+
+def history_date_label(iso_ts):
+    try:
+        day = datetime.fromisoformat(iso_ts).date()
+    except (ValueError, TypeError):
+        return ""
+    if day == date.today():
+        return "today"
+    return day.strftime("%d/%m/%Y")
 
 PHASE_META = {
     "None": ("idle", "Idle"),
@@ -37,7 +49,7 @@ PHASE_META = {
     "ChampSelect": ("champselect", "Champion Select"),
     "InProgress": ("ingame", "In Game"),
     "InGame": ("ingame", "In Game"),
-    "Searching...": ("searching", "Searching for client..."),
+    "Searching...": ("searching", "Client off"),
     "Stopped": ("stopped", "Stopped"),
 }
 
@@ -122,9 +134,11 @@ class MainWindow(QMainWindow):
         self._is_running = False
 
         self.session = self._load_session()
+        self.history = self._load_history()
 
         self._setup_ui()
         self._refresh_session_ui()
+        self._render_history()
 
         QTimer.singleShot(3000, lambda: self._check_for_updates())
 
@@ -147,7 +161,15 @@ class MainWindow(QMainWindow):
 
         content_layout.addWidget(self._create_status_card())
         content_layout.addWidget(self._create_session_card())
-        content_layout.addWidget(self._create_log_card(), 1)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("mainTabs")
+        self.log_card = self._create_log_card()
+        self.tabs.addTab(self.log_card, "Activity")
+        self.history_card = self._create_history_card()
+        self.tabs.addTab(self.history_card, "LP History")
+        content_layout.addWidget(self.tabs, 1)
+
         content_layout.addWidget(self._create_control_panel())
 
         root.addWidget(content, 1)
@@ -336,6 +358,91 @@ class MainWindow(QMainWindow):
 
         return card
 
+    def _create_history_card(self):
+        card = self._make_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header_label = QLabel("LP HISTORY")
+        header_label.setObjectName("logHeader")
+        header.addWidget(header_label)
+        header.addStretch()
+
+        self.clear_history_btn = QPushButton("Clear")
+        self.clear_history_btn.setObjectName("clearButton")
+        self.clear_history_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_history_btn.clicked.connect(self._clear_history)
+        header.addWidget(self.clear_history_btn)
+        layout.addLayout(header)
+
+        self.history_list = QListWidget()
+        self.history_list.setObjectName("historyList")
+        layout.addWidget(self.history_list, 1)
+
+        return card
+
+    def _load_history(self):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [e for e in data if isinstance(e, dict)][-MAX_HISTORY:]
+        except (OSError, ValueError, TypeError):
+            pass
+        return []
+
+    def _save_history(self):
+        try:
+            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.history[-MAX_HISTORY:], f, indent=2)
+        except OSError:
+            pass
+
+    def _render_history(self):
+        self.history_list.clear()
+        for i, entry in enumerate(self.history, start=1):
+            delta = entry.get("lp")
+            label = history_date_label(entry.get("ts", ""))
+            if delta is None:
+                text = f"{i} - (—) - {label}"
+                color = PALETTE["MUTED"]
+            else:
+                text = f"{i} - ({delta:+d} LP) - {label}"
+                color = PALETTE["SUCCESS"] if delta > 0 else PALETTE["ERROR"] if delta < 0 else PALETTE["MUTED"]
+            item = QListWidgetItem(text)
+            item.setForeground(QColor(color))
+            self.history_list.addItem(item)
+        if self.history:
+            self.history_list.scrollToBottom()
+
+    def _clear_history(self):
+        confirm = QMessageBox.question(
+            self,
+            "Clear history",
+            "Delete the saved LP match history?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self.history = []
+        self._save_history()
+        self._render_history()
+
+    def _record_history(self, result):
+        if result.get("remake"):
+            return
+        self.history.append({
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "lp": result.get("lp_delta"),
+            "result": result.get("result"),
+        })
+        self.history = self.history[-MAX_HISTORY:]
+        self._save_history()
+        self._render_history()
+
     def _create_control_panel(self):
         panel = QWidget()
         panel.setObjectName("root")
@@ -518,6 +625,7 @@ class MainWindow(QMainWindow):
 
         self._save_session()
         self._refresh_session_ui()
+        self._record_history(result)
 
     def _check_for_updates(self, manual=False):
         if self._checker is not None and self._checker.isRunning():

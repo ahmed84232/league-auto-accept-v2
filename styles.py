@@ -348,6 +348,41 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background-color: {{ACCENT}};
     border-radius: 7px;
 }
+
+#mainTabs::pane {
+    border: none;
+    background: transparent;
+}
+
+#mainTabs QTabBar::tab {
+    background-color: {{SURFACE_2}};
+    color: {{MUTED}};
+    border: 1px solid {{BORDER}};
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 6px 16px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+#mainTabs QTabBar::tab:selected {
+    background-color: {{SURFACE}};
+    color: {{TEXT}};
+}
+
+#historyList {
+    background-color: transparent;
+    border: none;
+    color: {{TEXT}};
+    font-size: 13px;
+    outline: none;
+}
+
+#historyList::item {
+    padding: 6px 4px;
+    border-bottom: 1px solid {{BORDER}};
+}
 """
 
 STYLESHEET = _QSS_TEMPLATE

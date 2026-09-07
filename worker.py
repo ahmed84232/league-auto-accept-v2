@@ -30,6 +30,7 @@ class AutoAcceptWorker(QThread):
     DIVISIONS = ("IV", "III", "II", "I")
 
     GAME_ACTIVE_PHASES = ("ChampSelect", "GameStart", "InProgress", "InGame", "Reconnect")
+    READY_CHECK_COOLDOWN = 15.0  # one client prompt never outlives this
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,6 +39,17 @@ class AutoAcceptWorker(QThread):
         self._last_log = None
         self._ranked_game = None
         self._midgame_checked = False
+        self._last_accept_ts = 0.0
+
+    def _should_accept(self, data):
+        if not isinstance(data, dict) or data.get("state") != "InProgress":
+            return False
+        # Already answered this prompt — never accept twice.
+        if data.get("playerResponse") in ("Accepted", "Declined"):
+            return False
+        if time.monotonic() - self._last_accept_ts < self.READY_CHECK_COOLDOWN:
+            return False
+        return True
 
     def stop(self):
         self._running = False
@@ -334,7 +346,7 @@ class AutoAcceptWorker(QThread):
             while self._running:
                 lockfile = self.find_lockfile()
                 if not lockfile:
-                    self._log("LeagueClientUx.exe process not found.", "warning")
+                    self._log("League client is off.", "warning")
                     self.connected_signal.emit(False)
                     self.phase_signal.emit("Searching...")
                     self._sleep(3)
@@ -411,16 +423,31 @@ class AutoAcceptWorker(QThread):
                     self._sleep(3)
                     continue
 
-                state = rc.json().get("state")
+                data = rc.json()
+                state = data.get("state")
                 if state == "Invalid":
                     self._log("No match found yet", "info")
                     self._sleep(2)
                 elif state == "InProgress":
+                    if not self._should_accept(data):
+                        # Same prompt still open (or answered) — wait it out.
+                        self._sleep(3)
+                        continue
                     self._log("Match Found", "success")
-                    session.post(accept, timeout=5)
-                    self._log("Match accepted!", "success")
-                    self.match_accepted_signal.emit()
-                    self._sleep(5)
+                    try:
+                        resp = session.post(accept, timeout=5)
+                        ok = resp.status_code < 400
+                    except requests.RequestException:
+                        ok = False
+                    if ok:
+                        self._last_accept_ts = time.monotonic()
+                        self._log("Match accepted! Waiting for players...", "success")
+                        self.match_accepted_signal.emit()
+                    else:
+                        self._log("Accept failed, will retry...", "warning")
+                    # The client prompt lives ~10s either way; wait it out
+                    # instead of hammering accept.
+                    self._sleep(10)
                 elif state == "Searching":
                     self._sleep(2)
                 else:
