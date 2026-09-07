@@ -32,13 +32,11 @@ def default_session():
     return {"wins": 0, "losses": 0, "lp_delta": 0, "tier": None, "division": None, "lp": None}
 
 
-def history_date_label(iso_ts):
+def format_history_date(iso_ts):
     try:
         day = datetime.fromisoformat(iso_ts).date()
     except (ValueError, TypeError):
-        return ""
-    if day == date.today():
-        return "today"
+        return "—"
     return day.strftime("%d/%m/%Y")
 
 PHASE_META = {
@@ -402,20 +400,24 @@ class MainWindow(QMainWindow):
 
     def _render_history(self):
         self.history_list.clear()
-        for i, entry in enumerate(self.history, start=1):
+        for entry in reversed(self.history):
+            outcome = entry.get("result")
+            if outcome == "win":
+                icon, word = "✓", "WIN"
+            elif outcome == "loss":
+                icon, word = "✗", "LOSS"
+            else:
+                icon, word = "?", "GAME"
             delta = entry.get("lp")
-            label = history_date_label(entry.get("ts", ""))
+            lp_str = f"{delta:+d} LP" if delta is not None else "—"
+            text = f"{icon}  {word:<4}  {lp_str:>6}  ·  {format_history_date(entry.get('ts', ''))}"
             if delta is None:
-                text = f"{i} - (—) - {label}"
                 color = PALETTE["MUTED"]
             else:
-                text = f"{i} - ({delta:+d} LP) - {label}"
                 color = PALETTE["SUCCESS"] if delta > 0 else PALETTE["ERROR"] if delta < 0 else PALETTE["MUTED"]
             item = QListWidgetItem(text)
             item.setForeground(QColor(color))
             self.history_list.addItem(item)
-        if self.history:
-            self.history_list.scrollToBottom()
 
     def _clear_history(self):
         confirm = QMessageBox.question(

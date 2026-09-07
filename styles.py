@@ -375,6 +375,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background-color: transparent;
     border: none;
     color: {{TEXT}};
+    font-family: 'Cascadia Code', 'Consolas', monospace;
     font-size: 13px;
     outline: none;
 }
