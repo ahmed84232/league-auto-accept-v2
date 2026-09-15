@@ -110,13 +110,14 @@ QWidget {
     font-size: 22px;
     font-weight: 700;
     color: {{TEXT}};
+    padding: 2px 0px;
 }
 
 #matchesLabel {
     font-size: 10px;
     font-weight: 600;
     color: {{MUTED}};
-    letter-spacing: 1.2px;
+    letter-spacing: 0.8px;
 }
 
 #sectionLabel {
@@ -176,18 +177,21 @@ QWidget {
     font-size: 22px;
     font-weight: 700;
     color: {{SUCCESS}};
+    padding: 2px 0px;
 }
 
 #sessionLossValue {
     font-size: 22px;
     font-weight: 700;
     color: {{ERROR}};
+    padding: 2px 0px;
 }
 
 #sessionLpValue {
     font-size: 22px;
     font-weight: 700;
     color: {{MUTED}};
+    padding: 2px 0px;
 }
 
 #sessionLpValue[delta="positive"] {

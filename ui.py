@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSizeGrip, QTabWidget, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from styles import LOG_COLORS, PALETTE
@@ -118,8 +118,8 @@ class MainWindow(QMainWindow):
         self.setObjectName("MainWindow")
         self.setWindowTitle("League Auto-Accept")
         self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setMinimumSize(460, 640)
-        self.resize(480, 720)
+        self.setMinimumSize(480, 680)
+        self.resize(500, 760)
 
         self.worker = None
         self._checker = None
@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
         self.matches_accepted = 0
         self.matches_played = 0
         self._is_running = False
+        self._pending_lp = {}
 
         self.session = self._load_session()
         self.history = self._load_history()
@@ -189,6 +190,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         top = QHBoxLayout()
+        top.setSpacing(8)
 
         self.conn_dot = QLabel("●")
         self.conn_dot.setObjectName("connectionDot")
@@ -197,33 +199,40 @@ class MainWindow(QMainWindow):
 
         self.conn_label = QLabel("Disconnected")
         self.conn_label.setObjectName("connectionLabel")
-        top.addWidget(self.conn_label)
-        top.addStretch()
+        self.conn_label.setWordWrap(False)
+        self.conn_label.setMinimumWidth(10)
+        self.conn_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        top.addWidget(self.conn_label, 1)
+        top.addStretch(0)
 
         matches_box = QVBoxLayout()
-        matches_box.setSpacing(0)
+        matches_box.setSpacing(2)
         self.matches_value = QLabel("0")
         self.matches_value.setObjectName("matchesValue")
-        self.matches_value.setAlignment(Qt.AlignRight)
-        matches_label = QLabel("MATCHES ACCEPTED")
+        self.matches_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.matches_value.setMinimumHeight(28)
+        self.matches_value.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        matches_label = QLabel("ACCEPTED")
         matches_label.setObjectName("matchesLabel")
         matches_label.setAlignment(Qt.AlignRight)
         matches_box.addWidget(self.matches_value)
         matches_box.addWidget(matches_label)
 
         played_box = QVBoxLayout()
-        played_box.setSpacing(0)
+        played_box.setSpacing(2)
         self.played_value = QLabel("0")
         self.played_value.setObjectName("matchesValue")
-        self.played_value.setAlignment(Qt.AlignRight)
-        played_label = QLabel("MATCHES PLAYED")
+        self.played_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.played_value.setMinimumHeight(28)
+        self.played_value.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        played_label = QLabel("PLAYED")
         played_label.setObjectName("matchesLabel")
         played_label.setAlignment(Qt.AlignRight)
         played_box.addWidget(self.played_value)
         played_box.addWidget(played_label)
 
         counts_row = QHBoxLayout()
-        counts_row.setSpacing(16)
+        counts_row.setSpacing(12)
         counts_row.addLayout(matches_box)
         counts_row.addLayout(played_box)
         top.addLayout(counts_row)
@@ -267,18 +276,22 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(12)
 
         self.wins_value = QLabel("0")
         self.wins_value.setObjectName("sessionWinValue")
-        self.wins_value.setAlignment(Qt.AlignCenter)
+        self.wins_value.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+        self.wins_value.setMinimumHeight(30)
+        self.wins_value.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         wins_label = QLabel("WINS")
         wins_label.setObjectName("statCaption")
         wins_label.setAlignment(Qt.AlignCenter)
 
         self.losses_value = QLabel("0")
         self.losses_value.setObjectName("sessionLossValue")
-        self.losses_value.setAlignment(Qt.AlignCenter)
+        self.losses_value.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+        self.losses_value.setMinimumHeight(30)
+        self.losses_value.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         losses_label = QLabel("LOSSES")
         losses_label.setObjectName("statCaption")
         losses_label.setAlignment(Qt.AlignCenter)
@@ -286,7 +299,9 @@ class MainWindow(QMainWindow):
         self.lp_delta_value = QLabel("+0")
         self.lp_delta_value.setObjectName("sessionLpValue")
         self.lp_delta_value.setProperty("delta", "zero")
-        self.lp_delta_value.setAlignment(Qt.AlignCenter)
+        self.lp_delta_value.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
+        self.lp_delta_value.setMinimumHeight(30)
+        self.lp_delta_value.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         lp_label = QLabel("LP")
         lp_label.setObjectName("statCaption")
         lp_label.setAlignment(Qt.AlignCenter)
@@ -297,7 +312,7 @@ class MainWindow(QMainWindow):
             (self.lp_delta_value, lp_label),
         ):
             col = QVBoxLayout()
-            col.setSpacing(2)
+            col.setSpacing(4)
             col.addWidget(value)
             col.addWidget(caption)
             row.addLayout(col, 1)
@@ -406,12 +421,14 @@ class MainWindow(QMainWindow):
                 icon, word = "✓", "WIN"
             elif outcome == "loss":
                 icon, word = "✗", "LOSS"
+            elif outcome == "remake":
+                icon, word = "○", "REMAKE"
             else:
                 icon, word = "?", "GAME"
             delta = entry.get("lp")
             lp_str = f"{delta:+d} LP" if delta is not None else "—"
-            text = f"{icon}  {word:<4}  {lp_str:>6}  ·  {format_history_date(entry.get('ts', ''))}"
-            if delta is None:
+            text = f"{icon}  {word:<6}  {lp_str:>6}  ·  {format_history_date(entry.get('ts', ''))}"
+            if outcome == "remake" or delta is None:
                 color = PALETTE["MUTED"]
             else:
                 color = PALETTE["SUCCESS"] if delta > 0 else PALETTE["ERROR"] if delta < 0 else PALETTE["MUTED"]
@@ -434,12 +451,13 @@ class MainWindow(QMainWindow):
         self._render_history()
 
     def _record_history(self, result):
-        if result.get("remake"):
-            return
+        is_remake = bool(result.get("remake"))
         self.history.append({
             "ts": datetime.now().isoformat(timespec="seconds"),
-            "lp": result.get("lp_delta"),
-            "result": result.get("result"),
+            # Remakes never carry LP — None renders as "—".
+            "lp": None if is_remake else result.get("lp_delta"),
+            "result": "remake" if is_remake else result.get("result"),
+            "game_id": result.get("game_id"),
         })
         self.history = self.history[-MAX_HISTORY:]
         self._save_history()
@@ -608,16 +626,27 @@ class MainWindow(QMainWindow):
             outcome = result.get("result")
             if outcome == "win":
                 self.session["wins"] += 1
-                self._add_log_entry("Victory! Session updated.", "success")
+                if result.get("pending"):
+                    self._add_log_entry("Victory! LP pending — will backfill.", "success")
+                else:
+                    self._add_log_entry("Victory! Session updated.", "success")
             elif outcome == "loss":
                 self.session["losses"] += 1
-                self._add_log_entry("Defeat. Session updated.", "warning")
+                if result.get("pending"):
+                    self._add_log_entry("Defeat. LP pending — will backfill.", "warning")
+                else:
+                    self._add_log_entry("Defeat. Session updated.", "warning")
             else:
                 self._add_log_entry("Game over — result could not be determined.", "warning")
 
         delta = result.get("lp_delta")
         if not result.get("remake") and delta is not None:
             self.session["lp_delta"] += delta
+
+        game_id = result.get("game_id")
+        if game_id is not None and result.get("pending") and not result.get("remake"):
+            # Provisional was None — correction will add the real delta later.
+            self._pending_lp[game_id] = delta
 
         post = result.get("post")
         if post:
@@ -628,6 +657,42 @@ class MainWindow(QMainWindow):
         self._save_session()
         self._refresh_session_ui()
         self._record_history(result)
+
+    def _on_game_result_correction(self, result):
+        game_id = result.get("game_id")
+        delta = result.get("lp_delta")
+        if game_id not in self._pending_lp:
+            return
+        provisional = self._pending_lp.pop(game_id, None)
+        if delta is None:
+            return
+        if provisional is not None:
+            delta_diff = delta - provisional
+        else:
+            delta_diff = delta
+        self.session["lp_delta"] += delta_diff
+
+        post = result.get("post")
+        if post:
+            self.session["tier"] = post.get("tier")
+            self.session["division"] = post.get("division")
+            self.session["lp"] = post.get("lp")
+
+        updated = False
+        for entry in reversed(self.history):
+            if entry.get("game_id") == game_id:
+                entry["lp"] = delta
+                updated = True
+                break
+        if not updated and self.history:
+            self.history[-1]["lp"] = delta
+            self.history[-1].setdefault("game_id", game_id)
+
+        self._save_session()
+        self._save_history()
+        self._refresh_session_ui()
+        self._render_history()
+        self._add_log_entry(f"LP backfilled  ({delta:+d} LP)", "success")
 
     def _check_for_updates(self, manual=False):
         if self._checker is not None and self._checker.isRunning():
@@ -764,6 +829,7 @@ class MainWindow(QMainWindow):
         self.worker.match_accepted_signal.connect(self._on_match_accepted)
         self.worker.game_started_signal.connect(self._on_game_started)
         self.worker.game_result_signal.connect(self._on_game_result)
+        self.worker.game_result_correction_signal.connect(self._on_game_result_correction)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.start()
 

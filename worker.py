@@ -10,6 +10,100 @@ from PySide6.QtCore import QThread, Signal
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+class LpBackfillWorker(QThread):
+
+    correction_signal = Signal(dict)
+    log_signal = Signal(str, str)
+
+    BACKFILL_TRIES = 17
+    BACKFILL_INTERVAL = 10.0
+
+    def __init__(self, port, auth_token, pre, game_id, parent=None):
+        super().__init__(parent)
+        self._port = port
+        self._auth_token = auth_token
+        self._pre = dict(pre) if pre else None
+        self._game_id = game_id
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def _sleep(self, seconds):
+        end = time.monotonic() + seconds
+        while self._running and time.monotonic() < end:
+            time.sleep(0.5)
+
+    def _ranked_stats(self, session, base):
+        try:
+            resp = session.get(
+                f"{base}/lol-ranked/v1/current-ranked-stats", timeout=5
+            )
+        except requests.RequestException:
+            return None
+        if resp.status_code == 404:
+            return None
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        if not data:
+            return None
+        entry = (data.get("queueMap") or {}).get(
+            AutoAcceptWorker.RANKED_QUEUE_NAME
+        )
+        if not entry:
+            entry = data.get("highestRankedEntrySR") or data.get("highestRankedEntry")
+        if not entry:
+            return None
+        return {
+            "tier": entry.get("tier"),
+            "division": entry.get("division"),
+            "lp": entry.get("leaguePoints"),
+            "wins": entry.get("wins"),
+            "losses": entry.get("losses"),
+        }
+
+    def run(self):
+        if not self._running or self._pre is None:
+            return
+        session = requests.Session()
+        session.verify = False
+        session.headers["Accept"] = "application/json"
+        if self._auth_token:
+            session.headers["Authorization"] = f"Basic {self._auth_token}"
+        base = f"https://127.0.0.1:{self._port}"
+        try:
+            for _ in range(self.BACKFILL_TRIES):
+                if not self._running:
+                    return
+                post = self._ranked_stats(session, base)
+                if post is not None and AutoAcceptWorker._stats_changed(
+                    self._pre, post
+                ):
+                    delta = AutoAcceptWorker._lp_delta(self._pre, post)
+                    self.log_signal.emit(
+                        f"LP update arrived late  ({delta:+d} LP)"
+                        if delta is not None
+                        else "LP update arrived late",
+                        "success",
+                    )
+                    self.correction_signal.emit({
+                        "correction": True,
+                        "game_id": self._game_id,
+                        "lp_delta": delta,
+                        "post": post,
+                    })
+                    return
+                self._sleep(self.BACKFILL_INTERVAL)
+            self.log_signal.emit(
+                "LP change not observed — showing — (will retry next game)",
+                "warning",
+            )
+        finally:
+            session.close()
+
+
 class AutoAcceptWorker(QThread):
 
     log_signal = Signal(str, str)
@@ -18,6 +112,7 @@ class AutoAcceptWorker(QThread):
     match_accepted_signal = Signal()
     game_started_signal = Signal()
     game_result_signal = Signal(dict)
+    game_result_correction_signal = Signal(dict)
 
     CLIENT_PROCESS = "LeagueClientUx.exe"
     RANKED_QUEUE_ID = 420
@@ -40,6 +135,7 @@ class AutoAcceptWorker(QThread):
         self._ranked_game = None
         self._midgame_checked = False
         self._last_accept_ts = 0.0
+        self._backfills = []
 
     def _should_accept(self, data):
         if not isinstance(data, dict) or data.get("state") != "InProgress":
@@ -53,6 +149,8 @@ class AutoAcceptWorker(QThread):
 
     def stop(self):
         self._running = False
+        for worker in list(self._backfills):
+            worker.stop()
 
     def find_lockfile(self):
         cached = self._lockfile
@@ -171,13 +269,13 @@ class AutoAcceptWorker(QThread):
             return None
         return post_pts - pre_pts
 
-    def _wait_for_ranked_update(self, session, base, pre):
+    def _wait_for_ranked_update(self, session, base, pre, tries=8, interval=2.0):
         post = None
-        for _ in range(8):
+        for _ in range(tries):
             post = self._ranked_stats(session, base)
             if post is not None and (pre is None or self._stats_changed(pre, post)):
                 return post
-            self._sleep(1)
+            self._sleep(interval)
         return post
 
     def _fetch_eog_result(self, session, base, summoner_id):
@@ -287,6 +385,30 @@ class AutoAcceptWorker(QThread):
             "started": True,
         }
 
+    def _cleanup_backfills(self):
+        self._backfills = [w for w in self._backfills if w.isRunning()]
+
+    def _spawn_backfill(self, session, base, pre, game_id):
+        try:
+            port = base.rsplit(":", 1)[-1]
+            auth_header = session.headers.get("Authorization", "")
+            token = auth_header[6:].strip() if auth_header.startswith("Basic ") else ""
+        except (AttributeError, IndexError):
+            return
+        if not port or pre is None:
+            return
+        self._cleanup_backfills()
+        backfill = LpBackfillWorker(port, token, pre, game_id)
+        backfill.correction_signal.connect(self.game_result_correction_signal.emit)
+        backfill.log_signal.connect(self._forward_backfill_log)
+        backfill.finished.connect(lambda: self._cleanup_backfills())
+        self._backfills.append(backfill)
+        self._log("LP not updated yet — will backfill when client catches up", "info")
+        backfill.start()
+
+    def _forward_backfill_log(self, message, level):
+        self._log(message, level)
+
     def _finalize_ranked_game(self, session, base):
         game = self._ranked_game
         self._ranked_game = None
@@ -311,7 +433,16 @@ class AutoAcceptWorker(QThread):
         remake = bool(eog and (eog.get("game_length") or 0) < 300)
         win = None if remake else (eog.get("win") if eog else None)
 
-        lp_delta = self._lp_delta(pre, post)
+        resolved = post is not None and (
+            pre is None or self._stats_changed(pre, post)
+        )
+        if pre is None or resolved:
+            lp_delta = self._lp_delta(pre, post)
+            pending = False
+        else:
+            # Client hasn't refreshed ranked stats yet — never emit false 0.
+            lp_delta = None
+            pending = True
 
         if remake:
             text = "Game over — remake, result not counted"
@@ -319,10 +450,14 @@ class AutoAcceptWorker(QThread):
             text = "Victory!"
             if lp_delta is not None:
                 text += f"  ({lp_delta:+d} LP)"
+            elif pending:
+                text += "  (LP pending...)"
         elif win is False:
             text = "Defeat"
             if lp_delta is not None:
                 text += f"  ({lp_delta:+d} LP)"
+            elif pending:
+                text += "  (LP pending...)"
         else:
             text = "Game over — result unknown"
 
@@ -332,7 +467,12 @@ class AutoAcceptWorker(QThread):
             "remake": remake,
             "lp_delta": lp_delta,
             "post": post,
+            "game_id": game_id,
+            "pending": pending,
         })
+
+        if pending and not remake and self._running:
+            self._spawn_backfill(session, base, pre, game_id)
 
     def run(self):
         if not self._running:
