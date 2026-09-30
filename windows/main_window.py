@@ -1,8 +1,7 @@
 import html
-import json
 import os
 import subprocess
-from datetime import date, datetime
+from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
@@ -12,24 +11,26 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSizeGrip, QSizePolicy, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from styles import LOG_COLORS, PALETTE
-from updater import (
+from windows.styles import LOG_COLORS, PALETTE
+from client_api.updater import (
     UPDATER_SCRIPT, UpdateChecker, UpdateDownloader,
     extract_update, pythonw_executable,
 )
 from version import __version__
-from worker import AutoAcceptWorker
+from client_api.worker import AutoAcceptWorker
+from client_api import history_store
+from client_api import session_store
+from client_api import session_manager
+from client_api.app_paths import SESSION_FILE, HISTORY_FILE, APP_DIR
 
 OWNER = "ahmed84232"
 REPO = "league-auto-accept-v2"
 
-SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session.json")
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
 MAX_HISTORY = 200
 
 
 def default_session():
-    return {"wins": 0, "losses": 0, "lp_delta": 0, "tier": None, "division": None, "lp": None}
+    return session_store.default_session()
 
 
 def format_history_date(iso_ts):
@@ -134,6 +135,9 @@ class MainWindow(QMainWindow):
 
         self.session = self._load_session()
         self.history = self._load_history()
+        self.vm = session_manager.SessionManager(
+            self.session, self.history, self._pending_lp, MAX_HISTORY
+        )
 
         self._setup_ui()
         self._refresh_session_ui()
@@ -397,21 +401,10 @@ class MainWindow(QMainWindow):
         return card
 
     def _load_history(self):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                return [e for e in data if isinstance(e, dict)][-MAX_HISTORY:]
-        except (OSError, ValueError, TypeError):
-            pass
-        return []
+        return history_store.load_history(HISTORY_FILE, MAX_HISTORY)
 
     def _save_history(self):
-        try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.history[-MAX_HISTORY:], f, indent=2)
-        except OSError:
-            pass
+        history_store.save_history(self.history, HISTORY_FILE, MAX_HISTORY)
 
     def _render_history(self):
         self.history_list.clear()
@@ -451,15 +444,7 @@ class MainWindow(QMainWindow):
         self._render_history()
 
     def _record_history(self, result):
-        is_remake = bool(result.get("remake"))
-        self.history.append({
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            # Remakes never carry LP — None renders as "—".
-            "lp": None if is_remake else result.get("lp_delta"),
-            "result": "remake" if is_remake else result.get("result"),
-            "game_id": result.get("game_id"),
-        })
-        self.history = self.history[-MAX_HISTORY:]
+        self.history = history_store.append_history(self.history, result, MAX_HISTORY)
         self._save_history()
         self._render_history()
 
@@ -570,21 +555,10 @@ class MainWindow(QMainWindow):
         self.played_value.setText(str(self.matches_played))
 
     def _load_session(self):
-        try:
-            with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            session = default_session()
-            session.update({k: data[k] for k in session if k in data})
-            return session
-        except (OSError, ValueError, TypeError):
-            return default_session()
+        return session_store.load_session(SESSION_FILE)
 
     def _save_session(self):
-        try:
-            with open(SESSION_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.session, f, indent=2)
-        except OSError:
-            pass
+        session_store.save_session(self.session, SESSION_FILE)
 
     def _refresh_session_ui(self):
         s = self.session
@@ -614,85 +588,39 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.Yes:
             return
-        self.session = default_session()
+        self.session = self.vm.reset_session()
+        self._pending_lp = self.vm.pending
         self._save_session()
         self._refresh_session_ui()
         self._add_log_entry("New session started.", "info")
 
     def _on_game_result(self, result):
-        if result.get("remake"):
-            self._add_log_entry("Remake detected — result not counted.", "warning")
-        else:
-            outcome = result.get("result")
-            if outcome == "win":
-                self.session["wins"] += 1
-                if result.get("pending"):
-                    self._add_log_entry("Victory! LP pending — will backfill.", "success")
-                else:
-                    self._add_log_entry("Victory! Session updated.", "success")
-            elif outcome == "loss":
-                self.session["losses"] += 1
-                if result.get("pending"):
-                    self._add_log_entry("Defeat. LP pending — will backfill.", "warning")
-                else:
-                    self._add_log_entry("Defeat. Session updated.", "warning")
-            else:
-                self._add_log_entry("Game over — result could not be determined.", "warning")
-
-        delta = result.get("lp_delta")
-        if not result.get("remake") and delta is not None:
-            self.session["lp_delta"] += delta
-
-        game_id = result.get("game_id")
-        if game_id is not None and result.get("pending") and not result.get("remake"):
-            # Provisional was None — correction will add the real delta later.
-            self._pending_lp[game_id] = delta
-
-        post = result.get("post")
-        if post:
-            self.session["tier"] = post.get("tier")
-            self.session["division"] = post.get("division")
-            self.session["lp"] = post.get("lp")
-
+        outcome = self.vm.apply_game_result(result)
+        for message, level in outcome["logs"]:
+            self._add_log_entry(message, level)
+        self.session = self.vm.session
+        self.history = self.vm.history
+        self._pending_lp = self.vm.pending
         self._save_session()
         self._refresh_session_ui()
-        self._record_history(result)
+        self._save_history()
+        self._render_history()
 
     def _on_game_result_correction(self, result):
-        game_id = result.get("game_id")
-        delta = result.get("lp_delta")
-        if game_id not in self._pending_lp:
+        outcome = self.vm.apply_correction(result)
+        if not outcome["handled"]:
+            self.session = self.vm.session
+            self._pending_lp = self.vm.pending
             return
-        provisional = self._pending_lp.pop(game_id, None)
-        if delta is None:
-            return
-        if provisional is not None:
-            delta_diff = delta - provisional
-        else:
-            delta_diff = delta
-        self.session["lp_delta"] += delta_diff
-
-        post = result.get("post")
-        if post:
-            self.session["tier"] = post.get("tier")
-            self.session["division"] = post.get("division")
-            self.session["lp"] = post.get("lp")
-
-        updated = False
-        for entry in reversed(self.history):
-            if entry.get("game_id") == game_id:
-                entry["lp"] = delta
-                updated = True
-                break
-        if not updated and self.history:
-            self.history[-1]["lp"] = delta
-            self.history[-1].setdefault("game_id", game_id)
-
+        self.session = self.vm.session
+        self.history = self.vm.history
+        self._pending_lp = self.vm.pending
         self._save_session()
         self._save_history()
         self._refresh_session_ui()
         self._render_history()
-        self._add_log_entry(f"LP backfilled  ({delta:+d} LP)", "success")
+        for message, level in outcome["logs"]:
+            self._add_log_entry(message, level)
 
     def _check_for_updates(self, manual=False):
         if self._checker is not None and self._checker.isRunning():
@@ -747,7 +675,7 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(url))
 
     def _start_update(self, download_url, tag=""):
-        app_dir = os.path.dirname(os.path.abspath(__file__))
+        app_dir = APP_DIR
         staging = os.path.join(app_dir, ".update")
         os.makedirs(staging, exist_ok=True)
 
@@ -775,7 +703,7 @@ class MainWindow(QMainWindow):
         self._apply_update()
 
     def _apply_update(self):
-        app_dir = os.path.dirname(os.path.abspath(__file__))
+        app_dir = APP_DIR
         extract_dir = os.path.join(self._update_staging, "extracted")
 
         try:

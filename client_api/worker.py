@@ -1,11 +1,15 @@
-import base64
 import os
 import time
 import urllib3
 
-import psutil
 import requests
 from PySide6.QtCore import QThread, Signal
+
+from client_api import league_api
+from client_api import client_lockfile
+from game_rules import accept_rules
+from game_rules import result_text
+from game_rules import rank_math
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -49,30 +53,16 @@ class LpBackfillWorker(QThread):
             return None
         if not data:
             return None
-        entry = (data.get("queueMap") or {}).get(
-            AutoAcceptWorker.RANKED_QUEUE_NAME
-        )
-        if not entry:
-            entry = data.get("highestRankedEntrySR") or data.get("highestRankedEntry")
+        entry = league_api.ranked_entry_from_data(data, rank_math.RANKED_QUEUE_NAME)
         if not entry:
             return None
-        return {
-            "tier": entry.get("tier"),
-            "division": entry.get("division"),
-            "lp": entry.get("leaguePoints"),
-            "wins": entry.get("wins"),
-            "losses": entry.get("losses"),
-        }
+        return league_api.normalize_ranked_entry(entry)
 
     def run(self):
         if not self._running or self._pre is None:
             return
-        session = requests.Session()
-        session.verify = False
-        session.headers["Accept"] = "application/json"
-        if self._auth_token:
-            session.headers["Authorization"] = f"Basic {self._auth_token}"
-        base = f"https://127.0.0.1:{self._port}"
+        session = league_api.build_session(self._auth_token)
+        base = league_api.base_url(self._port)
         try:
             for _ in range(self.BACKFILL_TRIES):
                 if not self._running:
@@ -114,18 +104,15 @@ class AutoAcceptWorker(QThread):
     game_result_signal = Signal(dict)
     game_result_correction_signal = Signal(dict)
 
-    CLIENT_PROCESS = "LeagueClientUx.exe"
-    RANKED_QUEUE_ID = 420
-    RANKED_QUEUE_NAME = "RANKED_SOLO_5x5"
+    CLIENT_PROCESS = client_lockfile.CLIENT_PROCESS
+    RANKED_QUEUE_ID = rank_math.RANKED_QUEUE_ID
+    RANKED_QUEUE_NAME = rank_math.RANKED_QUEUE_NAME
 
-    TIERS = (
-        "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM", "EMERALD",
-        "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER",
-    )
-    DIVISIONS = ("IV", "III", "II", "I")
+    TIERS = rank_math.TIERS
+    DIVISIONS = rank_math.DIVISIONS
 
-    GAME_ACTIVE_PHASES = ("ChampSelect", "GameStart", "InProgress", "InGame", "Reconnect")
-    READY_CHECK_COOLDOWN = 15.0  # one client prompt never outlives this
+    GAME_ACTIVE_PHASES = accept_rules.GAME_ACTIVE_PHASES
+    READY_CHECK_COOLDOWN = accept_rules.READY_CHECK_COOLDOWN
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -138,14 +125,9 @@ class AutoAcceptWorker(QThread):
         self._backfills = []
 
     def _should_accept(self, data):
-        if not isinstance(data, dict) or data.get("state") != "InProgress":
-            return False
-        # Already answered this prompt — never accept twice.
-        if data.get("playerResponse") in ("Accepted", "Declined"):
-            return False
-        if time.monotonic() - self._last_accept_ts < self.READY_CHECK_COOLDOWN:
-            return False
-        return True
+        return accept_rules.should_accept(
+            data, self._last_accept_ts, time.monotonic(), self.READY_CHECK_COOLDOWN
+        )
 
     def stop(self):
         self._running = False
@@ -157,24 +139,13 @@ class AutoAcceptWorker(QThread):
         if cached and os.path.exists(cached):
             return cached
 
-        for proc in psutil.process_iter(["name", "exe"]):
-            try:
-                if proc.info["name"] == self.CLIENT_PROCESS and proc.info["exe"]:
-                    lockfile = os.path.join(os.path.dirname(proc.info["exe"]), "lockfile")
-                    if os.path.exists(lockfile):
-                        self._lockfile = lockfile
-                        return lockfile
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-
-        self._lockfile = None
-        return None
+        found = client_lockfile.find_lockfile(self.CLIENT_PROCESS)
+        self._lockfile = found
+        return found
 
     @staticmethod
-    def read_credentials(lockfile):
-        with open(lockfile, "r", encoding="utf-8") as f:
-            parts = f.read().strip().split(":")
-        return parts[2], base64.b64encode(f"riot:{parts[3]}".encode()).decode()
+    def read_credentials(client_lockfile_path):
+        return client_lockfile.read_credentials(client_lockfile_path)
 
     def _sleep(self, seconds):
         end = time.monotonic() + seconds
@@ -196,29 +167,15 @@ class AutoAcceptWorker(QThread):
 
     def _queue_id(self, session, base):
         data = self._get(session, f"{base}/lol-gameflow/v1/session", "gameflow/session")
-        if not data:
-            return None
-        game_data = data.get("gameData") or {}
-        queue_id = game_data.get("queueId")
-        if queue_id is None:
-            queue_id = (game_data.get("queue") or {}).get("id")
-        return queue_id
+        return league_api.queue_id_from_session(data)
 
     def _session_context(self, session, base):
         data = self._get(session, f"{base}/lol-gameflow/v1/session", "gameflow/session")
-        if not data:
-            return None, None
-        game_data = data.get("gameData") or {}
-        queue_id = game_data.get("queueId")
-        if queue_id is None:
-            queue_id = (game_data.get("queue") or {}).get("id")
-        return queue_id, game_data.get("gameId")
+        return league_api.session_context_from_session(data)
 
     def _current_summoner_id(self, session, base):
         data = self._get(session, f"{base}/lol-summoner/v1/current-summoner", "summoner/current-summoner")
-        if not data:
-            return None
-        return str(data.get("summonerId", ""))
+        return league_api.summoner_id_from_summoner(data)
 
     def _ranked_stats(self, session, base):
         data = self._get(
@@ -226,48 +183,28 @@ class AutoAcceptWorker(QThread):
             f"{base}/lol-ranked/v1/current-ranked-stats",
             "ranked/current-ranked-stats",
         )
-        if not data:
-            return None
-        entry = (data.get("queueMap") or {}).get(self.RANKED_QUEUE_NAME)
+        entry = league_api.ranked_entry_from_data(data, self.RANKED_QUEUE_NAME)
         if not entry:
-            entry = data.get("highestRankedEntrySR") or data.get("highestRankedEntry")
-        if not entry:
-            self._log(
-                f"current-ranked-stats: no entry for {self.RANKED_QUEUE_NAME} "
-                f"(unranked or missing). Keys: {list((data.get('queueMap') or {}).keys())}",
-                "info",
-            )
+            if data:
+                self._log(
+                    f"current-ranked-stats: no entry for {self.RANKED_QUEUE_NAME} "
+                    f"(unranked or missing). Keys: {league_api.queue_keys(data)}",
+                    "info",
+                )
             return None
-        return {
-            "tier": entry.get("tier"),
-            "division": entry.get("division"),
-            "lp": entry.get("leaguePoints"),
-            "wins": entry.get("wins"),
-            "losses": entry.get("losses"),
-        }
+        return league_api.normalize_ranked_entry(entry)
 
     @staticmethod
     def _stats_changed(a, b):
-        return any(a.get(k) != b.get(k) for k in ("tier", "division", "lp", "wins", "losses"))
+        return rank_math.stats_changed(a, b)
 
     @classmethod
     def _rank_points(cls, stats):
-        tier = (stats or {}).get("tier")
-        division = (stats or {}).get("division")
-        lp = (stats or {}).get("lp") or 0
-        if tier not in cls.TIERS or division not in cls.DIVISIONS:
-            return None
-        return cls.TIERS.index(tier) * 400 + cls.DIVISIONS.index(division) * 100 + lp
+        return rank_math.rank_points(stats)
 
     @classmethod
     def _lp_delta(cls, pre, post):
-        if pre is None or post is None:
-            return None
-        pre_pts = cls._rank_points(pre)
-        post_pts = cls._rank_points(post)
-        if pre_pts is None or post_pts is None:
-            return None
-        return post_pts - pre_pts
+        return rank_math.lp_delta(pre, post)
 
     def _wait_for_ranked_update(self, session, base, pre, tries=8, interval=2.0):
         post = None
@@ -287,27 +224,11 @@ class AutoAcceptWorker(QThread):
             self._sleep(1)
         if data is None:
             return None
-        game_length = (
-            data.get("gameLength")
-            or (data.get("gameData") or {}).get("gameLength")
-            or 0
-        )
+        result, undetermined = league_api.eog_result_from_data(data, summoner_id)
+        if result is not None:
+            return result
 
         local = data.get("localPlayer") or {}
-        local_stats = local.get("stats") or {}
-        if local_stats.get("WIN") == 1:
-            return {"win": True, "game_length": game_length}
-        if local_stats.get("LOSE") == 1:
-            return {"win": False, "game_length": game_length}
-
-        for team in data.get("teams") or []:
-            if team.get("isPlayerTeam"):
-                return {"win": bool(team.get("isWinningTeam")), "game_length": game_length}
-
-        for player in data.get("players") or []:
-            if str(player.get("summonerId", "")) == summoner_id:
-                return {"win": bool(player.get("win", False)), "game_length": game_length}
-
         self._log(
             "eog-stats-block: could not determine result "
             f"(localPlayer keys: {list(local.keys())}, teams: {len(data.get('teams') or [])})",
@@ -326,28 +247,14 @@ class AutoAcceptWorker(QThread):
                 self._sleep(1)
                 continue
             games = ((data.get("games") or {}).get("games")) or []
-            match = None
-            for g in games:
-                if g.get("gameId") == game_id:
-                    match = g
-                    break
-            if match is None and games:
-                match = games[0]
+            match = league_api.pick_match(games, game_id)
             if match is None:
                 self._sleep(1)
                 continue
 
-            game_length = match.get("gameDuration") or 0
-            for ident in match.get("participantIdentities") or []:
-                player = ident.get("player") or {}
-                if not (str(player.get("summonerId", "")) == summoner_id
-                        or player.get("puuid") == puuid):
-                    continue
-                participant_id = ident.get("participantId")
-                for p in match.get("participants") or []:
-                    if p.get("participantId") == participant_id:
-                        win = bool((p.get("stats") or {}).get("win", False))
-                        return {"win": win, "game_length": game_length}
+            result, identified = league_api.match_result_from_match(match, summoner_id, puuid)
+            if result is not None:
+                return result
             self._log("match-history: could not identify summoner in match", "warning")
             self._sleep(1)
         return None
@@ -430,46 +337,12 @@ class AutoAcceptWorker(QThread):
             )
         post = self._wait_for_ranked_update(session, base, pre)
 
-        remake = bool(eog and (eog.get("game_length") or 0) < 300)
-        win = None if remake else (eog.get("win") if eog else None)
+        decision = result_text.decide_result_text(pre, post, eog, game_id)
+        pending = decision["pending"]
+        remake = decision["remake"]
 
-        resolved = post is not None and (
-            pre is None or self._stats_changed(pre, post)
-        )
-        if pre is None or resolved:
-            lp_delta = self._lp_delta(pre, post)
-            pending = False
-        else:
-            # Client hasn't refreshed ranked stats yet — never emit false 0.
-            lp_delta = None
-            pending = True
-
-        if remake:
-            text = "Game over — remake, result not counted"
-        elif win is True:
-            text = "Victory!"
-            if lp_delta is not None:
-                text += f"  ({lp_delta:+d} LP)"
-            elif pending:
-                text += "  (LP pending...)"
-        elif win is False:
-            text = "Defeat"
-            if lp_delta is not None:
-                text += f"  ({lp_delta:+d} LP)"
-            elif pending:
-                text += "  (LP pending...)"
-        else:
-            text = "Game over — result unknown"
-
-        self._log(text, "success" if win else "warning")
-        self.game_result_signal.emit({
-            "result": "win" if win is True else "loss" if win is False else "unknown",
-            "remake": remake,
-            "lp_delta": lp_delta,
-            "post": post,
-            "game_id": game_id,
-            "pending": pending,
-        })
+        self._log(decision["text"], decision["level"])
+        self.game_result_signal.emit(decision["payload"])
 
         if pending and not remake and self._running:
             self._spawn_backfill(session, base, pre, game_id)
@@ -478,14 +351,12 @@ class AutoAcceptWorker(QThread):
         if not self._running:
             return
 
-        session = requests.Session()
-        session.verify = False
-        session.headers["Accept"] = "application/json"
+        session = league_api.build_session()
 
         try:
             while self._running:
-                lockfile = self.find_lockfile()
-                if not lockfile:
+                client_lockfile_path = self.find_lockfile()
+                if not client_lockfile_path:
                     self._log("League client is off.", "warning")
                     self.connected_signal.emit(False)
                     self.phase_signal.emit("Searching...")
@@ -493,7 +364,7 @@ class AutoAcceptWorker(QThread):
                     continue
 
                 try:
-                    port, auth = self.read_credentials(lockfile)
+                    port, auth = self.read_credentials(client_lockfile_path)
                 except (IndexError, OSError) as exc:
                     self._log(f"Failed to read lockfile: {exc}", "error")
                     self.connected_signal.emit(False)
@@ -518,7 +389,7 @@ class AutoAcceptWorker(QThread):
             self.phase_signal.emit("Stopped")
 
     def _poll(self, session, port):
-        base = f"https://127.0.0.1:{port}"
+        base = league_api.base_url(port)
         phase_url = f"{base}/lol-gameflow/v1/gameflow-phase"
         ready_check = f"{base}/lol-matchmaking/v1/ready-check"
         accept = f"{base}/lol-matchmaking/v1/ready-check/accept"

@@ -2,8 +2,8 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from styles import STYLESHEET
-from ui import MainWindow
+from windows.styles import STYLESHEET
+from windows.main_window import MainWindow
 
 
 def main():
