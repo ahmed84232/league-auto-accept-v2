@@ -114,6 +114,10 @@ class AutoAcceptWorker(QThread):
     GAME_ACTIVE_PHASES = accept_rules.GAME_ACTIVE_PHASES
     READY_CHECK_COOLDOWN = accept_rules.READY_CHECK_COOLDOWN
 
+    # Transient LCU hiccups (one slow response under load) must not flip
+    # the badge: only N consecutive poll failures trigger a reconnect.
+    MAX_CONSEC_ERRORS = 3
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._running = True
@@ -123,6 +127,7 @@ class AutoAcceptWorker(QThread):
         self._midgame_checked = False
         self._last_accept_ts = 0.0
         self._backfills = []
+        self._consec_errors = 0
 
     def _should_accept(self, data):
         return accept_rules.should_accept(
@@ -337,7 +342,7 @@ class AutoAcceptWorker(QThread):
             )
         post = self._wait_for_ranked_update(session, base, pre)
 
-        decision = result_text.decide_result_text(pre, post, eog, game_id)
+        decision = result_text.decide_game_outcome(pre, post, eog, game_id)
         pending = decision["pending"]
         remake = decision["remake"]
 
@@ -393,11 +398,13 @@ class AutoAcceptWorker(QThread):
         phase_url = f"{base}/lol-gameflow/v1/gameflow-phase"
         ready_check = f"{base}/lol-matchmaking/v1/ready-check"
         accept = f"{base}/lol-matchmaking/v1/ready-check/accept"
+        self._consec_errors = 0
 
         while self._running:
             try:
                 phase_resp = session.get(phase_url, timeout=5)
                 phase = None if phase_resp.status_code == 404 else phase_resp.json()
+                self._consec_errors = 0
                 self.phase_signal.emit(phase or "None")
 
                 if phase in self.GAME_ACTIVE_PHASES:
@@ -465,5 +472,19 @@ class AutoAcceptWorker(QThread):
                     self._log("Waiting for you to press Find Match...", "info")
                     self._sleep(5)
             except (requests.RequestException, ValueError) as exc:
-                self._log(f"Connection error: {exc}", "error")
+                self._consec_errors += 1
+                if self._consec_errors >= self.MAX_CONSEC_ERRORS:
+                    self._log(f"Connection error: {exc}", "error")
+                    return
+                self._log("Connection hiccup, retrying...", "warning")
+                self._sleep(2)
+            except Exception as exc:
+                # Anything else used to escape _poll, skip run()'s handlers
+                # and kill the thread with zero trace (.pyw hides tracebacks).
+                # Log it visibly and take the normal reconnect path instead.
+                self._log(
+                    f"Worker fault ({type(exc).__name__}): {exc}"
+                    " — reconnecting...",
+                    "error",
+                )
                 return

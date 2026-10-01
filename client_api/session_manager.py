@@ -1,6 +1,6 @@
 """Session manager: pure game-result bookkeeping (no Qt, no file I/O).
 
-MainWindow keeps rendering + persistence; this class owns the rules for
+QmlBridge keeps rendering + persistence; this class owns the rules for
 wins/losses, lp_delta accumulation, pending backfills and history entries
 so they can be unit-tested without a GUI.
 """
@@ -24,6 +24,7 @@ class SessionManager:
         result = result or {}
         logs = []
         if result.get("remake"):
+            self.session["remakes"] = self.session.get("remakes", 0) + 1
             logs.append(("Remake detected — result not counted.", "warning"))
         else:
             outcome = result.get("result")
@@ -93,6 +94,35 @@ class SessionManager:
             self.history[-1].setdefault("game_id", game_id)
 
         return {"handled": True, "logs": [(f"LP backfilled  ({delta:+d} LP)", "success")]}
+
+    def apply_manual_adjustment(self, lp_delta, now=None):
+        """Record a hand-entered LP change (late Riot adjustments, fixes).
+
+        Sign decides the outcome: positive counts a win, negative a loss.
+        Rank tier/division/LP are untouched — only counters move.
+        """
+        if (isinstance(lp_delta, bool) or not isinstance(lp_delta, int)
+                or lp_delta == 0):
+            return {"handled": False, "logs": []}
+        outcome = "win" if lp_delta > 0 else "loss"
+        if outcome == "win":
+            self.session["wins"] = self.session.get("wins", 0) + 1
+            level = "success"
+        else:
+            self.session["losses"] = self.session.get("losses", 0) + 1
+            level = "warning"
+        self.session["lp_delta"] = self.session.get("lp_delta", 0) + lp_delta
+
+        entry = history_store.build_entry(
+            {"result": outcome, "remake": False,
+             "lp_delta": lp_delta, "game_id": None},
+            now=now,
+        )
+        self.history = (self.history + [entry])[-self.max_history:]
+        word = "Victory" if outcome == "win" else "Defeat"
+        return {"handled": True,
+                "logs": [(f"Manual fix: {word} ({lp_delta:+d} LP) recorded.",
+                          level)]}
 
 
 # Backwards-compatible alias (old name).

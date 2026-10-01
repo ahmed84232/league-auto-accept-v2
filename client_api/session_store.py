@@ -4,7 +4,7 @@ import json
 
 
 def default_session():
-    return {"wins": 0, "losses": 0, "lp_delta": 0, "tier": None, "division": None, "lp": None}
+    return {"wins": 0, "losses": 0, "remakes": 0, "lp_delta": 0, "tier": None, "division": None, "lp": None}
 
 
 def load_session(path):

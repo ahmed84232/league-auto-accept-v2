@@ -11,3 +11,4 @@ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SESSION_FILE = os.path.join(APP_DIR, "session.json")
 HISTORY_FILE = os.path.join(APP_DIR, "history.json")
+INSTANCE_LOCK_FILE = os.path.join(APP_DIR, "league-auto-accept.lock")
